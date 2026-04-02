@@ -1901,16 +1901,26 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   };
 
   const extractMessageAttachments = (msg: any) => {
-    const attachments = Array.isArray(msg?.attachments)
-      ? msg.attachments.filter((att: any) => att && typeof att.id === 'string' && att.id.trim())
+    const raw = Array.isArray(msg?.attachments)
+      ? msg.attachments.filter((att: any) => att && ((typeof att.id === 'string' && att.id.trim()) || (typeof att.fileId === 'string' && att.fileId.trim())))
       : [];
+    // Normalize to snake_case for component compatibility
+    const attachments = raw.map((att: any) => ({
+      id: att.id || att.fileId || '',
+      file_name: att.file_name || att.fileName || 'file',
+      file_type: att.file_type || att.fileType || 'document',
+      mime_type: att.mime_type || att.mimeType || '',
+      file_size: att.file_size || att.size || 0,
+      ...att,
+      id: att.id || att.fileId || '', // ensure id wins over ...att spread
+    }));
     const attachmentIds = attachments.map((att: any) => att.id);
     return {
       attachmentIds,
       attachmentsPayload: attachmentIds.length > 0
         ? attachmentIds.map((fileId: string) => ({ fileId }))
         : null,
-      optimisticAttachments: attachments.map((att: any) => ({ ...att })),
+      optimisticAttachments: attachments,
     };
   };
 

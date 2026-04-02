@@ -411,6 +411,9 @@ function initServer(mainWindow) {
             if (m.conversation_id !== id) return true;
             return new Date(m.created_at).getTime() < targetCreatedAt;
         });
+        // Reset engine session — old context is no longer valid
+        const conv = db.conversations.find(c => c.id === id);
+        if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(messages deleted)'); }
         saveDb();
         res.json({ success: true });
     });
@@ -430,6 +433,9 @@ function initServer(mainWindow) {
                 return new Date(m.created_at).getTime() < cutoffTime;
             });
         }
+        // Reset engine session — old context is no longer valid
+        const conv = db.conversations.find(c => c.id === id);
+        if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(tail deleted)'); }
         saveDb();
         res.json({ success: true });
     });
@@ -452,13 +458,22 @@ function initServer(mainWindow) {
 
     server.post('/api/upload', upload.single('file'), (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'No file' });
+        // Verify file on disk has actual content
+        let diskSize = 0;
+        try { diskSize = fs.statSync(req.file.path).size; } catch (_) {}
+        console.log(`[Upload] ${req.file.originalname} → ${req.file.path} (multer=${req.file.size}, disk=${diskSize})`);
+        if (diskSize === 0) {
+            // File is empty on disk — tell client to retry
+            try { fs.unlinkSync(req.file.path); } catch (_) {}
+            return res.status(422).json({ error: 'File upload incomplete (0 bytes on disk). Please retry.' });
+        }
         res.json({
             fileId: path.basename(req.file.path),
             fileName: req.file.originalname,
             fileType: req.file.mimetype.startsWith('image') ? 'image' : 'document',
             mimeType: req.file.mimetype,
             localPath: req.file.path,
-            size: req.file.size
+            size: diskSize
         });
     });
 
@@ -478,16 +493,24 @@ function initServer(mainWindow) {
             }
         } catch (_) {}
 
+        // Helper: serve file with correct mime type (avoids Express 5 sendFile Windows issues)
+        const serveFile = (fp) => {
+            const ext = path.extname(fp).toLowerCase();
+            const mimeTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json' };
+            res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+            res.send(fs.readFileSync(fp));
+        };
+
         for (const dir of searchDirs) {
             const filePath = path.join(dir, fileId);
             if (fs.existsSync(filePath)) {
-                return res.sendFile(filePath);
+                return serveFile(filePath);
             }
             // Try partial match
             try {
                 const files = fs.readdirSync(dir);
                 const match = files.find(f => f === fileId || f.includes(fileId));
-                if (match) return res.sendFile(path.join(dir, match));
+                if (match) return serveFile(path.join(dir, match));
             } catch (_) {}
         }
         res.status(404).json({ error: 'File not found' });
@@ -535,8 +558,8 @@ function initServer(mainWindow) {
 
         const env_token = req.body.env_token;
         const env_base_url = req.body.env_base_url;
-        const apiKey = env_token || process.env.ANTHROPIC_API_KEY;
-        const baseUrl = env_base_url || process.env.ANTHROPIC_BASE_URL;
+        const apiKey = env_token || engineEnvVars.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+        const baseUrl = env_base_url || engineEnvVars.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL;
 
         try {
             // Build a text summary of the conversation for the compaction prompt
@@ -863,35 +886,30 @@ You have the following skills available. When a user's request matches a skill's
         return block;
     }
 
-    // ═══════════════════════════════════════════════════════════
-    //  CHAT ENDPOINT — Direct Anthropic API with Agentic Loop
-    // ═══════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    //  CHAT ENDPOINT — Claude Code Engine via Bun CLI subprocess
+    // ═══════════════════════════════════════════════════════════════
 
-    // Helper: build API endpoint URL from base
-    function buildApiEndpoint(baseUrl) {
-        if (!baseUrl) return 'https://api.anthropic.com/v1/messages';
-        const clean = baseUrl.replace(/\/+$/, '');
-        return clean.endsWith('/v1') ? `${clean}/messages` : `${clean}/v1/messages`;
-    }
+    const { spawn } = require('child_process');
 
-    // Helper: load/save API message history for a conversation
-    function loadApiHistory(workspacePath) {
-        const p = path.join(workspacePath, '.api_history.json');
-        if (fs.existsSync(p)) {
-            try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { }
+    // Resolve engine path
+    const engineDir = path.join(__dirname, '..', 'engine');
+    const engineCli = path.join(engineDir, 'src', 'entrypoints', 'cli.tsx');
+    const engineEnv = path.join(engineDir, '.env');
+
+    // Load engine .env so bridge-server can use the same API config (for vision direct API calls)
+    const engineEnvVars = {};
+    try {
+        const envContent = fs.readFileSync(engineEnv, 'utf8');
+        for (const line of envContent.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx > 0) engineEnvVars[trimmed.slice(0, eqIdx)] = trimmed.slice(eqIdx + 1);
         }
-        return [];
-    }
-    function saveApiHistory(workspacePath, messages) {
-        // Limit size: keep last ~60 messages to stay under context limits
-        const MAX_MSGS = 60;
-        const trimmed = messages.length > MAX_MSGS ? messages.slice(-MAX_MSGS) : messages;
-        // Ensure first message is user role (API requirement)
-        let start = 0;
-        while (start < trimmed.length && trimmed[start].role !== 'user') start++;
-        const final = trimmed.slice(start);
-        fs.writeFileSync(path.join(workspacePath, '.api_history.json'), JSON.stringify(final, null, 0), 'utf8');
-    }
+        console.log('[Engine] Loaded .env:', Object.keys(engineEnvVars).join(', '));
+    } catch (_) {}
+    const enginePreload = path.join(engineDir, 'preload.ts');
 
     // Helper: stream one API round, returns parsed response
     async function streamApiRound(endpoint, apiKey, model, systemPrompt, messages, tools, thinkingEnabled, sendSSE) {
@@ -1017,6 +1035,7 @@ You have the following skills available. When a user's request matches a skill's
         return { contentBlocks, assistantText, thinkingText, stopReason, usage };
     }
 
+
     server.post('/api/chat', async (req, res) => {
         const { conversation_id, message, attachments, env_token, env_base_url } = req.body;
         const conv = db.conversations.find(c => c.id === conversation_id);
@@ -1025,267 +1044,316 @@ You have the following skills available. When a user's request matches a skill's
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-
-        const sendSSE = (data) => {
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-        };
+        const sendSSE = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
         try {
-            // ── 1. Handle attachments ──
+            // ── 1. Handle attachments & detect images ──
             let finalPrompt = message;
+            const imageBlocks = []; // base64 image blocks for direct API (vision)
+            let hasImages = false;
+
             if (attachments && attachments.length > 0) {
                 const copiedFiles = [];
                 for (const att of attachments) {
                     let srcPath = att.localPath;
                     if (!srcPath && att.fileId) {
-                        const searchDirs = [
-                            path.join(workspacesDir, conversation_id, '.uploads'),
-                            path.join(workspacesDir, 'temp', '.uploads'),
-                        ];
-                        for (const uploadsDir of searchDirs) {
+                        for (const dir of [path.join(workspacesDir, conversation_id, '.uploads'), path.join(workspacesDir, 'temp', '.uploads')]) {
                             if (srcPath) break;
-                            if (fs.existsSync(uploadsDir)) {
-                                const files = fs.readdirSync(uploadsDir);
-                                const match = files.find(f => f === att.fileId || f.includes(att.fileId));
-                                if (match) srcPath = path.join(uploadsDir, match);
+                            if (fs.existsSync(dir)) {
+                                const match = fs.readdirSync(dir).find(f => f === att.fileId || f.includes(att.fileId));
+                                if (match) srcPath = path.join(dir, match);
                             }
                         }
                     }
                     if (srcPath && fs.existsSync(srcPath)) {
-                        const fileName = att.fileName || path.basename(srcPath);
-                        try {
-                            fs.copyFileSync(srcPath, path.join(conv.workspace_path, fileName));
-                            copiedFiles.push(fileName);
-                        } catch (e) { console.error(`[Attachment] Copy failed: ${e.message}`); }
+                        const fn = att.fileName || path.basename(srcPath);
+                        try { fs.copyFileSync(srcPath, path.join(conv.workspace_path, fn)); copiedFiles.push(fn); } catch (_) {}
+
+                        // Detect images → prepare base64 for vision API
+                        const ext = path.extname(fn).toLowerCase();
+                        if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+                            try {
+                                const imgData = fs.readFileSync(srcPath);
+                                if (imgData.length > 100) { // Skip empty/corrupt files
+                                    hasImages = true;
+                                    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+                                    imageBlocks.push({
+                                        type: 'image',
+                                        source: { type: 'base64', media_type: mimeMap[ext] || 'image/png', data: imgData.toString('base64') }
+                                    });
+                                    console.log('[Chat] Image loaded:', fn, imgData.length, 'bytes');
+                                } else {
+                                    console.warn('[Chat] Skipping empty image:', fn, imgData.length, 'bytes');
+                                }
+                            } catch (_) {}
+                        }
                     }
                 }
-                if (copiedFiles.length > 0) {
-                    finalPrompt += '\n\n[The user has attached the following files to the current workspace directory. They are available for you to read if relevant. Do NOT read all of them upfront — only read specific files when needed.]\n';
+                if (copiedFiles.length > 0 && !hasImages) {
+                    finalPrompt += '\n\n[Attached files in workspace — read only when needed:]\n';
                     for (const fn of copiedFiles) finalPrompt += `- ./${fn}\n`;
                 }
             }
 
-            // ── 2. Save user message to display DB ──
-            const combinedUserContent = [{ type: 'text', text: message }];
+            // ── 2. Save user message ──
             db.messages.push({
-                id: uuidv4(),
-                conversation_id,
-                role: 'user',
-                content: JSON.stringify(combinedUserContent),
+                id: uuidv4(), conversation_id, role: 'user',
+                content: JSON.stringify([{ type: 'text', text: message }]),
                 created_at: new Date().toISOString(),
-                attachments: attachments?.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size })) : undefined
+                attachments: attachments && attachments.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size })) : undefined
             });
             saveDb();
 
             // ── 3. Build system prompt ──
-            let finalSystemPrompt = customSystemPrompt || '';
-
+            let sysPrompt = customSystemPrompt || '';
             if (conv.project_id) {
                 const project = db.projects.find(p => p.id === conv.project_id);
                 if (project) {
-                    if (project.instructions?.trim()) {
-                        finalSystemPrompt += `\n\n<project_instructions>\n${project.instructions.trim()}\n</project_instructions>`;
-                    }
-                    const projectFiles = db.project_files.filter(f => f.project_id === project.id);
-                    if (projectFiles.length > 0) {
-                        const MAX_TOTAL_CHARS = 80000;
-                        const filesWithText = projectFiles.filter(f => f.extracted_text);
-                        const totalTextSize = filesWithText.reduce((sum, f) => sum + (f.extracted_text?.length || 0), 0);
-                        if (totalTextSize <= MAX_TOTAL_CHARS && filesWithText.length > 0) {
-                            let ctx = '\n\n<project_knowledge_base>\nThe following files have been uploaded to this project as reference material:\n';
-                            for (const pf of filesWithText) ctx += `\n--- ${pf.file_name} ---\n${pf.extracted_text}\n`;
-                            ctx += '</project_knowledge_base>';
-                            finalSystemPrompt += ctx;
+                    if (project.instructions && project.instructions.trim()) sysPrompt += '\n\n<project_instructions>\n' + project.instructions.trim() + '\n</project_instructions>';
+                    const pFiles = db.project_files.filter(f => f.project_id === project.id);
+                    if (pFiles.length > 0) {
+                        const withText = pFiles.filter(f => f.extracted_text);
+                        const totalSz = withText.reduce((s, f) => s + (f.extracted_text ? f.extracted_text.length : 0), 0);
+                        if (totalSz <= 80000 && withText.length > 0) {
+                            let c = '\n\n<project_knowledge_base>\n';
+                            for (const pf of withText) c += '\n--- ' + pf.file_name + ' ---\n' + pf.extracted_text + '\n';
+                            sysPrompt += c + '</project_knowledge_base>';
                         } else {
-                            let ctx = '\n\n<project_knowledge_base>\n';
-                            ctx += `This project has ${projectFiles.length} uploaded file(s) in the workspace. Use Read to access them. File list:\n`;
-                            for (const pf of projectFiles) ctx += `- ${pf.file_name} (${Math.round((pf.file_size || 0) / 1024)} KB)\n`;
-                            ctx += 'Only read files relevant to the question.\n</project_knowledge_base>';
-                            finalSystemPrompt += ctx;
+                            let c = '\n\n<project_knowledge_base>\nFiles in workspace:\n';
+                            for (const pf of pFiles) c += '- ' + pf.file_name + ' (' + Math.round((pf.file_size || 0) / 1024) + ' KB)\n';
+                            sysPrompt += c + 'Read only when needed.\n</project_knowledge_base>';
                         }
                     }
                 }
             }
-            // Build skills index (lightweight — only names and descriptions)
-            const skillsBlock = getEnabledSkillsBlock();
-            if (skillsBlock) finalSystemPrompt += '\n\n' + skillsBlock;
 
-            // Build tool list: base tools + UseSkill (if any skills are enabled)
-            const enabledSkillsList = getAllEnabledSkills();
-            const allTools = [...TOOL_DEFINITIONS];
-            if (enabledSkillsList.length > 0) {
-                allTools.push({
-                    name: 'UseSkill',
-                    description: 'Load the full instructions of an enabled skill by name. Call this when the user\'s request matches a skill description. The returned instructions must be followed precisely.',
-                    input_schema: {
-                        type: 'object',
-                        properties: {
-                            skill_name: { type: 'string', description: 'The name of the skill to load (e.g. "skill-creator")' }
-                        },
-                        required: ['skill_name']
-                    }
-                });
-            }
-
-            // ── 4. Prepare API call ──
-            const apiKey = env_token || process.env.ANTHROPIC_API_KEY;
-            const baseUrl = env_base_url || process.env.ANTHROPIC_BASE_URL;
-            const endpoint = buildApiEndpoint(baseUrl);
+            // ── 4. Determine mode: images → direct API, text → Claude Code engine ──
+            // Engine .env is authoritative for base URL; frontend may have stale value
+            const apiKey = env_token || engineEnvVars.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+            const baseUrl = engineEnvVars.ANTHROPIC_BASE_URL || env_base_url || process.env.ANTHROPIC_BASE_URL;
+            console.log('[Chat] Key source:', env_token ? 'user(' + env_token.slice(0, 8) + '...)' : engineEnvVars.ANTHROPIC_API_KEY ? 'engine-env' : process.env.ANTHROPIC_API_KEY ? 'process-env' : 'NONE', '| baseUrl:', baseUrl);
             const rawModel = conv.model || 'claude-sonnet-4-6';
-            const thinkingEnabled = rawModel.endsWith('-thinking');
             const modelId = rawModel.replace(/-thinking$/, '');
 
-            // Load conversation API history and append user message
-            let apiMessages = loadApiHistory(conv.workspace_path);
-            apiMessages.push({ role: 'user', content: finalPrompt });
+            // ── 4a. IMAGE MODE: Vision via Bun subprocess (Node.js in Electron can't connect) ──
+            if (hasImages) {
+                console.log('[Chat] Image detected, using Bun vision helper');
+                const endpoint = baseUrl ? (baseUrl.replace(/\/+$/, '').endsWith('/v1') ? baseUrl.replace(/\/+$/, '') + '/messages' : baseUrl.replace(/\/+$/, '') + '/v1/messages') : 'https://api.anthropic.com/v1/messages';
+                const userContent = [...imageBlocks, { type: 'text', text: message }];
+                const apiBody = { model: modelId, system: sysPrompt || undefined, messages: [{ role: 'user', content: userContent }], max_tokens: 8192, stream: true };
 
-            // ── 5. Agentic Loop ──
-            const MAX_ROUNDS = 25;
-            const MAX_NETWORK_RETRIES = 2;
-            const NETWORK_ERR_RE = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed/i;
-            let totalAssistantText = '';
-            let totalThinkingText = '';
-            const allToolCalls = new Map();
+                // Write request to temp file (too large for CLI args)
+                const tmpFile = path.join(conv.workspace_path, '.vision_req.json');
+                fs.writeFileSync(tmpFile, JSON.stringify({ endpoint, apiKey, body: apiBody }));
 
-            for (let round = 0; round < MAX_ROUNDS; round++) {
-                let roundResult;
+                const visionHelper = path.join(engineDir, 'vision-helper.ts');
+                const bunExe = process.platform === 'win32' ? path.join(os.homedir(), '.bun', 'bin', 'bun.exe') : 'bun';
 
-                // Retry loop for transient network errors
-                for (let retry = 0; retry <= MAX_NETWORK_RETRIES; retry++) {
-                    try {
-                        roundResult = await streamApiRound(
-                            endpoint, apiKey, modelId, finalSystemPrompt,
-                            apiMessages, allTools, thinkingEnabled, sendSSE
-                        );
-                        break; // success
-                    } catch (err) {
-                        const errMsg = err.message || '';
-                        // Prompt too long: trim history and retry
-                        if (/prompt is too long|too many tokens|context.*length/i.test(errMsg) && apiMessages.length > 2) {
-                            console.log(`[Chat] Prompt too long, trimming history (was ${apiMessages.length} msgs)...`);
-                            sendSSE({ type: 'status', message: '对话上下文过长，正在裁剪历史并重试...' });
-                            // Keep first msg + last 6 messages
-                            apiMessages = [apiMessages[0], ...apiMessages.slice(-6)];
-                            // Ensure alternating roles
-                            if (apiMessages[0].role !== 'user') apiMessages.shift();
-                            continue;
+                console.log('[Chat] Vision request:', endpoint, 'body size:', fs.statSync(tmpFile).size, 'bytes');
+                const { spawn } = require('child_process');
+                const vChild = spawn(bunExe, [visionHelper, tmpFile], {
+                    cwd: conv.workspace_path,
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                });
+                vChild.stdin.end();
+
+                let assistantText = '';
+                let vBuf = '';
+                vChild.stdout.on('data', (chunk) => {
+                    vBuf += chunk.toString('utf8');
+                    const lines = vBuf.split('\n');
+                    vBuf = lines.pop() || '';
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        let parsed;
+                        try { parsed = JSON.parse(line); } catch { continue; }
+                        if (parsed.type === 'error') {
+                            sendSSE({ type: 'error', error: parsed.error });
+                        } else if (parsed.type === 'content_block_delta' && parsed.delta && parsed.delta.type === 'text_delta') {
+                            assistantText += parsed.delta.text;
+                            sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: parsed.delta.text } });
+                        } else if (parsed.type === 'content_block_delta' && parsed.delta && parsed.delta.type === 'thinking_delta') {
+                            sendSSE({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: parsed.delta.thinking } });
                         }
-                        // Network error: retry with delay
-                        if (NETWORK_ERR_RE.test(errMsg) && retry < MAX_NETWORK_RETRIES) {
-                            const delay = (retry + 1) * 3;
-                            console.log(`[Chat] Network error, retry ${retry + 1}/${MAX_NETWORK_RETRIES} in ${delay}s...`);
-                            sendSSE({ type: 'status', message: `网络连接异常，${delay}秒后自动重试 (${retry + 1}/${MAX_NETWORK_RETRIES})...` });
-                            await new Promise(r => setTimeout(r, delay * 1000));
-                            continue;
-                        }
-                        throw err; // non-recoverable
                     }
+                });
+
+                let vStderr = '';
+                vChild.stderr.on('data', (c) => { vStderr += c.toString('utf8'); });
+
+                await new Promise((resolve, reject) => {
+                    vChild.on('close', (code) => {
+                        try { fs.unlinkSync(tmpFile); } catch (_) {}
+                        if (code !== 0 && !assistantText) reject(new Error(vStderr || 'Vision helper failed'));
+                        else resolve();
+                    });
+                    vChild.on('error', reject);
+                });
+
+                if (assistantText) {
+                    db.messages.push({ id: uuidv4(), conversation_id, role: 'assistant', content: JSON.stringify([{ type: 'text', text: assistantText }]), created_at: new Date().toISOString() });
+                    saveDb();
+                    generateTitleAsync(conversation_id, message.slice(0, 300), assistantText.slice(0, 300), apiKey, baseUrl, conv.model);
                 }
-
-                if (!roundResult) throw new Error('Failed after retries');
-
-                totalAssistantText += roundResult.assistantText;
-                totalThinkingText += roundResult.thinkingText;
-
-                // Append assistant response to API history
-                const assistantContent = roundResult.contentBlocks.filter(b => b.type !== 'thinking');
-                apiMessages.push({ role: 'assistant', content: assistantContent });
-
-                // ── Handle stop reasons ──
-                if (roundResult.stopReason === 'end_turn' || roundResult.stopReason === 'stop_sequence') {
-                    break; // Done!
-                }
-
-                if (roundResult.stopReason === 'max_tokens') {
-                    // Auto-continue
-                    apiMessages.push({ role: 'user', content: '继续' });
-                    continue;
-                }
-
-                if (roundResult.stopReason === 'tool_use') {
-                    // Execute each tool and collect results
-                    const toolUseBlocks = roundResult.contentBlocks.filter(b => b.type === 'tool_use');
-                    const toolResults = [];
-
-                    for (const tu of toolUseBlocks) {
-                        let result;
-                        if (tu.name === 'UseSkill') {
-                            // Handle UseSkill: look up skill content by name
-                            const skillName = tu.input?.skill_name || '';
-                            const skill = enabledSkillsList.find(s => s.name === skillName);
-                            if (skill) {
-                                console.log(`[Skill] Loaded "${skillName}" (${(skill.content || '').length} chars)`);
-                                result = { content: skill.content || 'Skill has no content.' };
-                            } else {
-                                result = { content: `Skill "${skillName}" not found. Available: ${enabledSkillsList.map(s => s.name).join(', ')}`, is_error: true };
-                            }
-                        } else {
-                            result = await executeTool(tu.name, tu.input, conv.workspace_path);
-                        }
-                        const resultContent = result.content || '';
-
-                        // Track for frontend display
-                        allToolCalls.set(tu.id, {
-                            id: tu.id,
-                            name: tu.name,
-                            input: tu.input,
-                            status: result.is_error ? 'error' : 'done',
-                            result: resultContent
-                        });
-
-                        // Notify frontend
-                        sendSSE({
-                            type: 'tool_use_done',
-                            tool_use_id: tu.id,
-                            content: resultContent.slice(0, 50000), // Cap for frontend display
-                            is_error: result.is_error || false,
-                        });
-
-                        toolResults.push({
-                            type: 'tool_result',
-                            tool_use_id: tu.id,
-                            content: resultContent,
-                            is_error: result.is_error || false,
-                        });
-                    }
-
-                    // Append tool results to API history and continue loop
-                    apiMessages.push({ role: 'user', content: toolResults });
-                    continue;
-                }
-
-                // Unknown stop reason — break
-                break;
+                sendSSE({ type: 'message_stop' });
+                res.write('data: [DONE]\n\n');
+                res.end();
+                return;
             }
 
-            // ── 6. Save results ──
-            saveApiHistory(conv.workspace_path, apiMessages);
+            // ── 4b. TEXT MODE: Claude Code engine via Bun CLI ──
 
-            if (totalAssistantText || totalThinkingText || allToolCalls.size > 0) {
+            const cliArgs = [
+                '--preload', enginePreload,
+                '--env-file=' + engineEnv, engineCli,
+                '-p', finalPrompt,
+                '--output-format', 'stream-json',
+                '--verbose',
+                '--include-partial-messages',
+                '--permission-mode', 'bypassPermissions',
+                '--model', modelId,
+            ];
+            if (conv.claude_session_id) cliArgs.push('--resume', conv.claude_session_id);
+            if (sysPrompt) cliArgs.push('--append-system-prompt', sysPrompt);
+
+            const envVars = Object.assign({}, process.env);
+            if (apiKey) envVars.ANTHROPIC_API_KEY = apiKey;
+            if (baseUrl) envVars.ANTHROPIC_BASE_URL = baseUrl;
+
+            const bunExe = process.platform === 'win32'
+                ? path.join(os.homedir(), '.bun', 'bin', 'bun.exe') : 'bun';
+
+            console.log('[Engine] model=' + modelId + ' session=' + (conv.claude_session_id || 'new'));
+            const { spawn } = require('child_process');
+            const child = spawn(bunExe, cliArgs, {
+                cwd: conv.workspace_path, env: envVars,
+                stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            child.stdin.end();
+
+            // ── 5. Parse stream-json and forward to frontend ──
+            let assistantText = '';
+            let thinkingText = '';
+            const toolCalls = new Map();
+            const sentToolStarts = new Set(); // track which tool_use_start we already sent
+            const writtenFiles = new Map(); // deduplicate Write tool results by file path
+            let sessionId = conv.claude_session_id;
+            let buf = '';
+
+            // Tools that are internal to Claude Code and should not be shown to the user
+            const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'ExitPlanMode', 'EnterWorktree', 'ExitWorktree', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TaskOutput', 'TaskStop']);
+
+            child.stdout.on('data', (chunk) => {
+                buf += chunk.toString('utf8');
+                const lines = buf.split('\n');
+                buf = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    var evt;
+                    try { evt = JSON.parse(line); } catch { continue; }
+
+                    if (evt.session_id && !sessionId) {
+                        sessionId = evt.session_id;
+                        conv.claude_session_id = sessionId;
+                        saveDb();
+                    }
+
+                    if (evt.type === 'stream_event' && evt.event) {
+                        var se = evt.event;
+                        // Forward text and thinking deltas
+                        if (se.type === 'content_block_delta') {
+                            if (se.delta && se.delta.type === 'text_delta') {
+                                assistantText += se.delta.text;
+                                sendSSE({ type: 'content_block_delta', delta: { type: 'text_delta', text: se.delta.text } });
+                            } else if (se.delta && se.delta.type === 'thinking_delta') {
+                                thinkingText += se.delta.thinking;
+                                sendSSE({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: se.delta.thinking } });
+                            }
+                        }
+                        // Track tool_use start from stream (don't send yet — wait for full input from assistant event)
+                        else if (se.type === 'content_block_start' && se.content_block && se.content_block.type === 'tool_use') {
+                            var tu = se.content_block;
+                            toolCalls.set(tu.id, { id: tu.id, name: tu.name, input: {}, status: 'running' });
+                            // Don't send tool_use_start here — input is empty. Wait for 'assistant' event with full input.
+                        }
+                    }
+                    // Complete assistant message — has full tool input
+                    else if (evt.type === 'assistant' && evt.message && evt.message.content) {
+                        for (var block of evt.message.content) {
+                            if (block.type === 'tool_use') {
+                                var tc = toolCalls.get(block.id);
+                                if (tc) tc.input = block.input;
+                                // Send tool_use_start with full input (only once per tool)
+                                if (!sentToolStarts.has(block.id) && !HIDDEN_TOOLS.has(block.name)) {
+                                    sentToolStarts.add(block.id);
+                                    sendSSE({ type: 'tool_use_start', tool_use_id: block.id, tool_name: block.name, tool_input: block.input });
+                                    console.log('[Tool]', block.name, JSON.stringify(block.input || {}).slice(0, 120));
+                                }
+                            }
+                        }
+                    }
+                    // Tool result
+                    else if (evt.type === 'tool') {
+                        var resultText = typeof evt.content === 'string' ? evt.content
+                            : Array.isArray(evt.content) ? evt.content.map(function(b) { return b.text || ''; }).join('') : '';
+                        var tc2 = toolCalls.get(evt.tool_use_id);
+                        var toolName = tc2 ? tc2.name : '';
+                        if (tc2) { tc2.status = evt.is_error ? 'error' : 'done'; tc2.result = resultText; }
+
+                        // Deduplicate Write tool: only keep last version per file path
+                        if (toolName === 'Write' && tc2 && tc2.input && tc2.input.file_path) {
+                            var prevId = writtenFiles.get(tc2.input.file_path);
+                            if (prevId) {
+                                // Remove previous Write for same file from toolCalls
+                                toolCalls.delete(prevId);
+                            }
+                            writtenFiles.set(tc2.input.file_path, evt.tool_use_id);
+                        }
+
+                        // Don't send results for hidden/internal tools
+                        if (!HIDDEN_TOOLS.has(toolName)) {
+                            sendSSE({ type: 'tool_use_done', tool_use_id: evt.tool_use_id, content: resultText.slice(0, 50000), is_error: evt.is_error || false });
+                        }
+                    }
+                    // Final result
+                    else if (evt.type === 'result' && !assistantText && evt.result) {
+                        assistantText = typeof evt.result === 'string' ? evt.result : '';
+                    }
+                }
+            });
+
+            let stderrBuf = '';
+            child.stderr.on('data', function(c) { stderrBuf += c.toString('utf8'); });
+
+            await new Promise(function(resolve, reject) {
+                child.on('close', function(code) {
+                    if (buf.trim()) { try { var e = JSON.parse(buf); if (!assistantText && e.result) assistantText = typeof e.result === 'string' ? e.result : ''; } catch(x) {} }
+                    if (code !== 0 && !assistantText) reject(new Error(stderrBuf || 'Engine exit ' + code));
+                    else resolve();
+                });
+                child.on('error', reject);
+            });
+
+            // ── 6. Save results ──
+            if (assistantText || thinkingText || toolCalls.size > 0) {
                 db.messages.push({
-                    id: uuidv4(),
-                    conversation_id,
-                    role: 'assistant',
-                    content: JSON.stringify([{ type: 'text', text: totalAssistantText }]),
+                    id: uuidv4(), conversation_id, role: 'assistant',
+                    content: JSON.stringify([{ type: 'text', text: assistantText }]),
                     created_at: new Date().toISOString(),
-                    thinking: totalThinkingText || undefined,
-                    toolCalls: allToolCalls.size > 0 ? Array.from(allToolCalls.values()) : undefined
+                    thinking: thinkingText || undefined,
+                    toolCalls: toolCalls.size > 0 ? Array.from(toolCalls.values()) : undefined
                 });
                 saveDb();
-                generateTitleAsync(conversation_id, message.slice(0, 300), totalAssistantText.slice(0, 300), apiKey, baseUrl, conv.model);
+                generateTitleAsync(conversation_id, message.slice(0, 300), assistantText.slice(0, 300), apiKey, baseUrl, conv.model);
             }
 
             sendSSE({ type: 'message_stop' });
             res.write('data: [DONE]\n\n');
             res.end();
         } catch (err) {
-            console.error('[Chat] Error:', err);
-            const errMsg = err.message || '';
-            if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(errMsg)) {
-                sendSSE({ type: 'error', error: `网络连接失败 (${errMsg.slice(0, 60)})。请检查：1) 网络是否正常  2) 如使用代理，确认代理覆盖了本应用  3) 防火墙是否放行` });
-            } else {
-                sendSSE({ type: 'error', error: errMsg });
-            }
+            console.error('[Chat] Error:', (err.message || '').slice(0, 300));
+            sendSSE({ type: 'error', error: err.message || 'Engine error' });
             res.end();
         }
     });

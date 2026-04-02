@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronRight, Smartphone, MonitorIcon, LogOut, MoreHorizontal, Check, X } from 'lucide-react';
-import { getUserProfile, updateUserProfile, getUserUsage, getSessions, deleteSession, logoutOtherSessions, changePassword, deleteAccount, logout } from '../api';
+import { getUserProfile, updateUserProfile, getUserUsage, getGatewayUsage, getSessions, deleteSession, logoutOtherSessions, changePassword, deleteAccount, logout } from '../api';
 
 interface SettingsPageProps {
   onClose: () => void;

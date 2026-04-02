@@ -23,6 +23,11 @@ frontend-error.log
 .env.local
 *.local
 
+# Engine dependencies (install separately with: cd engine && bun install)
+engine/node_modules/
+engine/.env
+engine/bun.lockb
+
 # Editor
 .vscode/*
 !.vscode/extensions.json

@@ -234,35 +234,40 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
       {/* Content */}
       <div className={`flex-1 overflow-y-auto chat-font-scope ${fmt === 'docx' || fmt === 'pdf' ? 'px-6 py-6 bg-claude-hover' : 'px-8 py-6'} ${viewMode === 'code' || isCode ? '!p-0 overflow-hidden bg-[#FAFAFA] dark:bg-[#1E1E1E]' : ''}`}>
         {viewMode === 'code' || isCode ? (
-             <div className="flex h-full font-mono text-[13px] leading-relaxed relative bg-[#FAFAFA] dark:bg-[#1E1E1E]">
-                 {/* Line Numbers */}
-                 <div ref={lineNumbersRef} className="flex-none w-[36px] bg-[#FAFAFA] dark:bg-[#1E1E1E] border-r border-claude-border text-right pt-4 pr-1.5 select-none text-claude-textSecondary opacity-50 overflow-hidden h-full">
-                     {doc.content?.split('\n').map((_, i) => (
-                         <div key={i} style={{ lineHeight: '1.625' }}>{i + 1}</div>
-                     ))}
-                 </div>
-                 {/* Code Content */}
+             <div className="flex h-full font-mono text-[13px] leading-relaxed relative bg-[#FAFAFA] dark:bg-[#1E1E1E] overflow-hidden">
+                 {/* Unified scrollable area with line numbers + code side by side */}
                 <div ref={contentRef} onScroll={handleScroll} className="flex-1 overflow-auto bg-[#FAFAFA] dark:bg-[#1E1E1E]">
-                    <SyntaxHighlighter
-                        language={isCode ? fmt : 'markdown'}
-                        style={isDark ? vscDarkPlus : oneLight}
-                        customStyle={{
-                            margin: 0,
-                            padding: '16px',
-                            background: 'transparent',
-                            fontSize: '14px',
-                            fontFamily: 'Menlo, Monaco, SF Mono, Cascadia Code, Fira Code, Consolas, Courier New, monospace',
-                            lineHeight: '1.625',
-                            border: 'none',
-                            boxShadow: 'none',
-                            minHeight: '100%',
-                        }}
-                        codeTagProps={{
-                            style: { fontFamily: "inherit" }
-                        }}
-                    >
-                        {doc.content || ''}
-                    </SyntaxHighlighter>
+                    <div className="flex min-h-full">
+                        {/* Line Numbers — inside the scroll container so they scroll together */}
+                        <div className="flex-none w-[40px] bg-[#FAFAFA] dark:bg-[#1E1E1E] text-right pt-4 pr-2 select-none text-claude-textSecondary opacity-50 sticky left-0">
+                            {doc.content?.split('\n').map((_: string, i: number) => (
+                                <div key={i} style={{ lineHeight: '1.625' }}>{i + 1}</div>
+                            ))}
+                        </div>
+                        {/* Code Content */}
+                        <div className="flex-1 min-w-0">
+                            <SyntaxHighlighter
+                                language={isCode ? fmt : 'markdown'}
+                                style={isDark ? vscDarkPlus : oneLight}
+                                customStyle={{
+                                    margin: 0,
+                                    padding: '16px 16px 16px 8px',
+                                    background: 'transparent',
+                                    fontSize: '14px',
+                                    fontFamily: 'Menlo, Monaco, SF Mono, Cascadia Code, Fira Code, Consolas, Courier New, monospace',
+                                    lineHeight: '1.625',
+                                    border: 'none',
+                                    boxShadow: 'none',
+                                    minHeight: '100%',
+                                }}
+                                codeTagProps={{
+                                    style: { fontFamily: "inherit" }
+                                }}
+                            >
+                                {doc.content || ''}
+                            </SyntaxHighlighter>
+                        </div>
+                    </div>
                 </div>
             </div>
         ) : (

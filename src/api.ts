@@ -200,11 +200,37 @@ export async function updateUserProfile(data: Record<string, any>) {
 }
 
 export async function getUserUsage() {
+  let usage: any = null;
+
+  // Get plan info from Chengdu backend
   if (isElectronApp && localStorage.getItem('auth_token')) {
     try {
-      return await chengduRequest('/user/usage');
+      usage = await chengduRequest('/user/usage');
     } catch (_) {}
   }
+
+  // In Electron mode, overlay gateway usage (the real usage data) onto Chengdu's plan info
+  if (isElectronApp) {
+    try {
+      const gwUsage = await getGatewayUsage();
+      if (gwUsage && usage && usage.quota) {
+        // Combine: Chengdu tracks website usage, gateway tracks app usage
+        if (usage.quota.window) {
+          const webUsed = usage.quota.window.used || 0;
+          const appUsed = gwUsage.window_used || 0;
+          usage.quota.window.used = webUsed + appUsed;
+        }
+        if (usage.quota.week) {
+          const webUsed = usage.quota.week.used || 0;
+          const appUsed = gwUsage.week_used || 0;
+          usage.quota.week.used = webUsed + appUsed;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (usage) return usage;
+
   return {
     plan: {
       id: 999,

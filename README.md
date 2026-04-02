@@ -47,10 +47,14 @@ npm run electron:build:linux  # Linux (.AppImage)
 Electron App
 ├── React Frontend (Vite + TailwindCSS)
 ├── Bridge Server (Express, localhost:30080)
-│   ├── Direct Anthropic API calls (SSE streaming)
-│   ├── Local tool execution engine
-│   ├── Agentic loop (tool_use → execute → continue)
-│   └── Conversation & project management
+│   ├── CRUD: conversations, projects, files, skills
+│   ├── Chat: spawns Claude Code engine per message
+│   └── Vision: Bun subprocess for image analysis
+├── Claude Code Engine (engine/)
+│   ├── Full Claude Code TypeScript source
+│   ├── 19+ tools (Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, Agent...)
+│   ├── Agentic loop with real SSE streaming
+│   └── Session management with --resume
 └── Electron Main Process
 ```
 
@@ -61,8 +65,12 @@ Electron App
 | Frontend | React 19, TypeScript, TailwindCSS |
 | Build | Vite 6 |
 | Desktop | Electron |
+| Engine | Claude Code (TypeScript, runs via Bun) |
 | Markdown | react-markdown, highlight.js, KaTeX, Mermaid |
-| API | Anthropic Messages API (direct HTTP, no SDK) |
+
+## Prerequisites
+
+- [Bun](https://bun.sh) — required for the Claude Code engine
 
 ## Configuration
 
@@ -70,4 +78,4 @@ Set a custom API key and base URL in **Settings > General** to use your own Anth
 
 ## License
 
-MIT
+Non-commercial use only. See [LICENSE](LICENSE) for details.

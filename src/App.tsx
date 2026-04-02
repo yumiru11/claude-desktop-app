@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation, useParams, useNavigate } from 'react-router-dom';
-import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu } from 'lucide-react';
+import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu, Folder } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
 import { IconSidebarToggle } from './components/Icons';
@@ -185,6 +185,23 @@ const ChatHeader = ({
             <FileText size={18} strokeWidth={1.5} />
           </button>
         )}
+        <button
+          className="px-2 h-8 flex items-center justify-center text-claude-textSecondary hover:text-claude-text transition-colors"
+          title="Open Workspace Folder"
+          onClick={async () => {
+            if (!id) return;
+            try {
+              const res = await fetch(`http://127.0.0.1:30080/api/conversations/${id}`);
+              if (!res.ok) return;
+              const data = await res.json();
+              if (data.workspace_path && (window as any).electronAPI?.openFolder) {
+                (window as any).electronAPI.openFolder(data.workspace_path);
+              }
+            } catch (e) { console.error('Open folder failed:', e); }
+          }}
+        >
+          <Folder size={17} strokeWidth={1.5} />
+        </button>
         <button
           onClick={async () => {
             if (!id || isExporting) return;
