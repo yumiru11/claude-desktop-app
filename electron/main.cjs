@@ -157,10 +157,14 @@ app.whenReady().then(() => {
         });
 
         autoUpdater.on('update-downloaded', (info) => {
-            console.log('[Update] Downloaded:', info.version);
+            console.log('[Update] Downloaded:', info.version, '— auto-restarting in 3s');
             if (mainWindow) {
                 mainWindow.webContents.send('update-status', { type: 'downloaded', version: info.version });
             }
+            // Auto-restart after 3 seconds to apply update
+            setTimeout(() => {
+                autoUpdater.quitAndInstall(false, true);
+            }, 3000);
         });
 
         autoUpdater.on('error', (err) => {
