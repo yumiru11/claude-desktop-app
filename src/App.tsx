@@ -4,7 +4,8 @@ import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu, Folder, Arr
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
 import { IconSidebarToggle } from './components/Icons';
-import { updateConversation, deleteConversation, exportConversation, getUnreadAnnouncements, markAnnouncementRead } from './api';
+import { updateConversation, deleteConversation, exportConversation, getUnreadAnnouncements, markAnnouncementRead, getSystemStatus } from './api';
+import GitBashRequiredModal from './components/GitBashRequiredModal';
 import Auth from './components/Auth';
 import Onboarding from './components/Onboarding';
 import SettingsPage from './components/SettingsPage';
@@ -263,6 +264,26 @@ const Layout = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('onboarding_done'));
+  const [needsGitBash, setNeedsGitBash] = useState(false);
+
+  // Check for git-bash on Windows (required by Claude Code SDK)
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const status = await getSystemStatus();
+        if (cancelled) return;
+        if (status.gitBash.required && !status.gitBash.found) {
+          setNeedsGitBash(true);
+        }
+      } catch {
+        // Bridge server not ready yet — retry shortly
+        if (!cancelled) setTimeout(check, 1500);
+      }
+    };
+    check();
+    return () => { cancelled = true; };
+  }, []);
 
   // Document panel state
   const [documentPanelDoc, setDocumentPanelDoc] = useState<DocumentInfo | null>(null);
@@ -530,6 +551,11 @@ const Layout = () => {
     toggleAbsTop: 11,
     toggleAbsLeft: 8, // Collapsed State Left Position
   });
+
+  // Git-bash required (Windows): block app until installed
+  if (needsGitBash) {
+    return <GitBashRequiredModal onResolved={() => setNeedsGitBash(false)} />;
+  }
 
   // Onboarding: show on first launch
   if (showOnboarding) {

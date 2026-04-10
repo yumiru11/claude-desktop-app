@@ -1836,6 +1836,16 @@ function initServer(mainWindow) {
     });
 
     // ===== Provider CRUD =====
+    server.get('/api/system-status', (req, res) => {
+        res.json({
+            platform: process.platform,
+            gitBash: {
+                required: process.platform === 'win32',
+                found: !!gitBashPath,
+                path: gitBashPath || null,
+            },
+        });
+    });
     server.get('/api/providers', (req, res) => {
         res.json(providers);
     });
@@ -2455,6 +2465,39 @@ You have the following skills available. When a user's request matches a skill's
     const bunExePath = findBunExe();
     console.log('[Engine] Bun:', bunExePath, 'exists:', fs.existsSync(bunExePath));
 
+    // Detect git-bash on Windows (Claude Code SDK requires it).
+    // Returns a path to bash.exe, or null if not found.
+    function findGitBashPath() {
+        if (process.platform !== 'win32') return null;
+        if (process.env.CLAUDE_CODE_GIT_BASH_PATH && fs.existsSync(process.env.CLAUDE_CODE_GIT_BASH_PATH)) {
+            return process.env.CLAUDE_CODE_GIT_BASH_PATH;
+        }
+        const candidates = [
+            'C:\\Program Files\\Git\\bin\\bash.exe',
+            'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+            path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Git', 'bin', 'bash.exe'),
+            process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe'),
+            process.env.ProgramW6432 && path.join(process.env.ProgramW6432, 'Git', 'bin', 'bash.exe'),
+        ].filter(Boolean);
+        for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) return candidate;
+        }
+        // Fallback: try `where git` and derive bash path from it
+        try {
+            const out = require('child_process').execSync('where git', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+            const gitExe = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
+            if (gitExe) {
+                const bashFromGit = path.join(path.dirname(path.dirname(gitExe)), 'bin', 'bash.exe');
+                if (fs.existsSync(bashFromGit)) return bashFromGit;
+            }
+        } catch (_) {}
+        return null;
+    }
+    const gitBashPath = findGitBashPath();
+    if (process.platform === 'win32') {
+        console.log('[Engine] git-bash:', gitBashPath || 'NOT FOUND (Claude Code SDK will fail)');
+    }
+
     // Load engine .env so bridge-server can use the same API config (for vision direct API calls)
     const engineEnvVars = {};
     try {
@@ -2847,6 +2890,9 @@ You have the following skills available. When a user's request matches a skill's
         if (conv.claude_session_id) cliArgs.push('--resume', conv.claude_session_id);
         if (sysPrompt) cliArgs.push('--append-system-prompt', sysPrompt);
         const envVars = Object.assign({}, process.env);
+        if (gitBashPath && !envVars.CLAUDE_CODE_GIT_BASH_PATH) {
+            envVars.CLAUDE_CODE_GIT_BASH_PATH = gitBashPath;
+        }
         if (apiFormat === 'openai' && proxyPort > 0) {
             proxyTarget = { apiKey, baseUrl, model: modelId, format: 'openai', conversationId: convId };
             envVars.ANTHROPIC_API_KEY = 'proxy-key'; envVars.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + proxyPort + '/v1';

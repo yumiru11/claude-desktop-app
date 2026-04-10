@@ -1443,7 +1443,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         const buffConvId = activeId;
         getConversation(buffConvId).then(data => {
           if (data?.model && viewingIdRef.current === buffConvId) {
-            setCurrentModelString(data.model);
+            setCurrentModelString(isModelSelectable(data.model) ? data.model : resolveModelForNewChat(data.model));
           }
         }).catch(() => {});
       } else {
@@ -1701,9 +1701,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     stopPolling();
     try {
       const data = await getConversation(conversationId);
-      // Restore conversation model — always trust the server's stored model
+      // Restore conversation model, but fall back if the stored model was removed
       if (data.model) {
-        setCurrentModelString(data.model);
+        setCurrentModelString(isModelSelectable(data.model) ? data.model : resolveModelForNewChat(data.model));
       }
       const normalizedMessages = (data.messages || []).map((msg: any) => {
         // Normalize attachment field names (bridge-server uses camelCase, component expects snake_case)
