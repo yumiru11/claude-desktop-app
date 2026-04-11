@@ -586,24 +586,23 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
                     paddingRight: `${tunerConfig?.recentsPl || 12}px`
                   }}
                 >
-                  {/* Streaming indicator */}
+                  {/* Streaming indicator — single breathing dot */}
                   {streamingIds.has(chat.id) && (
-                    <span className="flex-shrink-0 mr-2 flex items-center gap-[3px]">
-                      <span className="w-[3px] h-[3px] rounded-full bg-[#C6613F] animate-bounce" style={{ animationDelay: '0ms', animationDuration: '1s' }} />
-                      <span className="w-[3px] h-[3px] rounded-full bg-[#C6613F] animate-bounce" style={{ animationDelay: '150ms', animationDuration: '1s' }} />
-                      <span className="w-[3px] h-[3px] rounded-full bg-[#C6613F] animate-bounce" style={{ animationDelay: '300ms', animationDuration: '1s' }} />
-                    </span>
+                    <span
+                      className="flex-shrink-0 mr-2 w-[7px] h-[7px] rounded-full bg-neutral-700 dark:bg-neutral-300 animate-pulse"
+                      style={{ animationDuration: '1.6s' }}
+                    />
                   )}
                   {/* Chat Title */}
                   <div className="flex-1 min-w-0 pr-6">
                     <div
-                      className="text-claude-text truncate leading-tight"
+                      className="text-claude-text truncate leading-snug"
                       style={{ fontSize: `${tunerConfig?.recentsFontSize || 13}px` }}
                     >
                       {chat.title || 'New Chat'}
                     </div>
                     {chat.project_name && (
-                      <div className="text-[11px] text-claude-textSecondary truncate leading-tight mt-0.5 opacity-60">
+                      <div className="text-[11px] text-claude-textSecondary truncate leading-snug mt-0.5 opacity-60">
                         {chat.project_name}
                       </div>
                     )}

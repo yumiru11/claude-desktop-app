@@ -763,7 +763,7 @@ const ProviderSettings: React.FC = () => {
                              '尚未测试'}
                           </div>
                           <div className="text-[11px] text-claude-textSecondary/80 leading-relaxed">
-                            {isTesting ? 'Anthropic 格式会启动一个临时 engine 跑真实对话，耗时约 30-90 秒；OpenAI 格式约 10 秒' :
+                            {isTesting ? '正在向供应商发送一次带 web_search 工具的探测请求（最长 45 秒）' :
                              supported ? (
                                <>
                                  策略：<span className="font-mono text-claude-text">{strategy || '—'}</span>

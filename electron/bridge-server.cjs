@@ -1507,15 +1507,49 @@ function initServer(mainWindow) {
         const msgIndex = db.messages.findIndex(m => m.id === messageId && m.conversation_id === id);
         if (msgIndex === -1) return res.status(404).json({ error: 'Message not found' });
 
+        // Find the message immediately BEFORE the one being deleted (chronologically).
+        // Its id is the engine session uuid we'll resume to — engine memory after spawn
+        // will be the session JSONL sliced to [0..previousMsg] inclusive.
+        const orderedConvMsgs = db.messages
+            .filter(m => m.conversation_id === id)
+            .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        const orderedIndex = orderedConvMsgs.findIndex(m => m.id === messageId);
+        const previousMsg = orderedIndex > 0 ? orderedConvMsgs[orderedIndex - 1] : null;
+
         // Remove this message and all subsequent messages in the conversation
         const targetCreatedAt = new Date(db.messages[msgIndex].created_at).getTime();
         db.messages = db.messages.filter(m => {
             if (m.conversation_id !== id) return true;
             return new Date(m.created_at).getTime() < targetCreatedAt;
         });
-        // Reset engine session 鈥?old context is no longer valid
+
+        // Engine context rewind: don't null claude_session_id (we still need --resume).
+        // Store the rewind point on the conv so spawnPersistentEngine adds
+        // --resume-session-at on the next spawn. Mark the existing engine for
+        // restart so the chat handler kills + respawns it before the next turn.
         const conv = db.conversations.find(c => c.id === id);
-        if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(messages deleted)'); }
+        if (conv) {
+            if (previousMsg && previousMsg.engineUuidSynced) {
+                // previousMsg's id is a real engine session uuid — engine can find it.
+                conv.pendingResumeAt = previousMsg.id;
+                console.log('[Session] Rewind queued for conv', id, '→ resume-session-at', previousMsg.id);
+            } else if (previousMsg) {
+                // Pre-fix message: id is bridge-generated, won't match anything in the
+                // engine session JSONL. Fall back to clean-session reset (loses prior
+                // context but doesn't crash the engine on respawn).
+                conv.pendingResumeAt = null;
+                conv.claude_session_id = null;
+                console.log('[Session] Reset for conv', id, '(previous msg pre-uuid-sync, falling back to fresh session)');
+            } else {
+                // Deleting the very first message: nothing to resume to. Start fresh.
+                conv.pendingResumeAt = null;
+                conv.claude_session_id = null;
+                console.log('[Session] Reset for conv', id, '(deleted first message)');
+            }
+        }
+        const existingEngine = enginePool.get(id);
+        if (existingEngine) existingEngine.needsRestart = true;
+
         saveDb();
         res.json({ success: true });
     });
@@ -1526,6 +1560,10 @@ function initServer(mainWindow) {
         if (isNaN(numToRemove) || numToRemove <= 0) return res.status(400).json({ error: 'Invalid count' });
 
         const convMsgs = db.messages.filter(m => m.conversation_id === id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        // The message just BEFORE the tail-cut becomes the new last message — its id
+        // is the engine session uuid we resume to.
+        const previousMsg = convMsgs.length > numToRemove ? convMsgs[convMsgs.length - numToRemove - 1] : null;
+
         if (convMsgs.length <= numToRemove) {
             db.messages = db.messages.filter(m => m.conversation_id !== id);
         } else {
@@ -1535,9 +1573,28 @@ function initServer(mainWindow) {
                 return new Date(m.created_at).getTime() < cutoffTime;
             });
         }
-        // Reset engine session 鈥?old context is no longer valid
+
+        // Engine context rewind via --resume-session-at on next spawn (see single-msg
+        // delete handler above for full rationale).
         const conv = db.conversations.find(c => c.id === id);
-        if (conv) { conv.claude_session_id = null; console.log('[Session] Reset for conv', id, '(tail deleted)'); }
+        if (conv) {
+            if (previousMsg && previousMsg.engineUuidSynced) {
+                conv.pendingResumeAt = previousMsg.id;
+                console.log('[Session] Rewind queued for conv', id, '(tail) → resume-session-at', previousMsg.id);
+            } else if (previousMsg) {
+                // Pre-fix message — fall back to clean-session reset.
+                conv.pendingResumeAt = null;
+                conv.claude_session_id = null;
+                console.log('[Session] Reset for conv', id, '(tail, previous msg pre-uuid-sync, falling back to fresh session)');
+            } else {
+                conv.pendingResumeAt = null;
+                conv.claude_session_id = null;
+                console.log('[Session] Reset for conv', id, '(tail deleted whole conversation)');
+            }
+        }
+        const existingEngine = enginePool.get(id);
+        if (existingEngine) existingEngine.needsRestart = true;
+
         saveDb();
         res.json({ success: true });
     });
@@ -1994,163 +2051,110 @@ function initServer(mainWindow) {
         return { ok: false, strategy: null, reason: 'No structured search results in response' };
     }
 
-    // Engine-based Anthropic probe: runs a real throwaway engine conversation with the provider's
-    // credentials and a prompt that asks the model to use WebSearch. Parses the engine's stream-json
-    // output for WebSearch tool invocations and URL-bearing tool_result content. This matches the
-    // exact code path used by real chats, so aggregators/gateways that only work through the engine's
-    // Anthropic SDK (not via raw fetch) are handled correctly.
-    async function probeAnthropicWebSearch(p) {
+    // Direct HTTPS probe using node's https module for detailed error diagnostics.
+    // Tries both auth styles (Authorization: Bearer — used by most aggregators — and x-api-key —
+    // used by the canonical Anthropic API). The probe issues a single /v1/messages call containing
+    // web_search_20250305 as a server tool. A response containing server_tool_use + at least one
+    // URL in web_search_tool_result counts as success.
+    function doAnthropicHttpProbe(p, authStyle) {
         return new Promise((resolve) => {
+            const https = require('https');
+            const { URL } = require('url');
+            const baseUrl = normalizeBaseUrl(p.baseUrl || '');
+            let parsed;
+            try { parsed = new URL(baseUrl); } catch (e) { return resolve({ ok: false, reason: 'Invalid baseUrl: ' + e.message }); }
             const rawModel = (p.models || []).find(m => m.enabled !== false)?.id || (p.models || [])[0]?.id;
-            if (!rawModel) return resolve({ ok: false, strategy: null, reason: '无可用模型' });
+            if (!rawModel) return resolve({ ok: false, reason: '无可用模型' });
             const modelId = rawModel.replace(/-thinking$/, '');
 
-            const tmpDir = path.join(os.tmpdir(), 'ws-probe-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));
-            try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (_) {}
-            const claudeDir = path.join(os.homedir(), '.claude');
+            const body = JSON.stringify({
+                model: modelId,
+                max_tokens: 1024,
+                messages: [{ role: 'user', content: 'Use web search to find the top news headline from today. Respond with just the headline and source URL.' }],
+                tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 1 }],
+            });
 
-            const cliArgs = [
-                '--preload', enginePreload,
-                '--env-file=' + engineEnv,
-                engineCli,
-                '--input-format', 'stream-json',
-                '--output-format', 'stream-json',
-                '--verbose',
-                '--include-partial-messages',
-                '--permission-mode', 'bypassPermissions',
-                '--add-dir', claudeDir,
-                '--model', modelId,
-            ];
-
-            const envVars = Object.assign({}, process.env);
-            if (gitBashPath && !envVars.CLAUDE_CODE_GIT_BASH_PATH) envVars.CLAUDE_CODE_GIT_BASH_PATH = gitBashPath;
-            envVars.ANTHROPIC_API_KEY = p.apiKey || '';
-            envVars.ANTHROPIC_BASE_URL = normalizeBaseUrl(p.baseUrl || '');
-
-            let child;
-            try {
-                const { spawn } = require('child_process');
-                child = spawn(bunExePath, cliArgs, { cwd: tmpDir, env: envVars, stdio: ['pipe', 'pipe', 'pipe'] });
-            } catch (err) {
-                return resolve({ ok: false, strategy: null, reason: 'Engine spawn failed: ' + err.message });
-            }
-
-            let finished = false;
-            let ready = false;
-            let calledWebSearch = false;
-            let hitCount = 0;
-            let buf = '';
-            let stderrBuf = '';
-            let errorMessage = null;
-
-            const cleanup = () => {
-                try { child.kill(); } catch (_) {}
-                setTimeout(() => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {} }, 500);
+            const headers = {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body),
+                'anthropic-version': '2023-06-01',
+                'User-Agent': 'claude-app-probe/1.0',
             };
-            const finish = (result) => {
-                if (finished) return;
-                finished = true;
-                clearTimeout(timeout);
-                cleanup();
-                resolve(result);
-            };
-            const timeout = setTimeout(() => {
-                finish({ ok: false, strategy: null, reason: 'Probe timed out after 120s' });
-            }, 120000);
+            if (authStyle === 'bearer') headers['Authorization'] = 'Bearer ' + (p.apiKey || '');
+            else headers['x-api-key'] = p.apiKey || '';
 
-            const extractUrlsFromToolResult = (content) => {
-                if (!content) return 0;
-                const text = typeof content === 'string' ? content : JSON.stringify(content);
-                // WebSearchTool formats: `Links: [{"title":"...","url":"..."}, ...]`
-                const linksMatch = text.match(/Links:\s*(\[[\s\S]*?\])/);
-                if (linksMatch) {
-                    try {
-                        const arr = JSON.parse(linksMatch[1]);
-                        if (Array.isArray(arr)) return arr.filter(x => x && x.url).length;
-                    } catch (_) {}
-                }
-                // Fallback: count bare URLs
-                const urlMatches = text.match(/https?:\/\/[^\s"'<>)]+/g);
-                return urlMatches ? urlMatches.length : 0;
+            const pathSuffix = (parsed.pathname.replace(/\/+$/, '') || '') + '/v1/messages';
+            const opts = {
+                host: parsed.hostname,
+                port: parsed.port || 443,
+                path: pathSuffix,
+                method: 'POST',
+                headers,
+                timeout: 45000,
             };
 
-            const processEvt = (evt) => {
-                if (evt.type === 'system' && evt.subtype === 'init') {
-                    ready = true;
-                    try {
-                        const probePrompt = 'Call the WebSearch tool right now with query "latest news today". Do not answer from memory. Do not explain — just invoke the tool once and summarize the first 2 results.';
-                        child.stdin.write(JSON.stringify({
-                            type: 'user',
-                            message: { role: 'user', content: probePrompt },
-                            uuid: uuidv4(),
-                        }) + '\n');
-                    } catch (err) {
-                        finish({ ok: false, strategy: null, reason: 'Failed to send probe prompt: ' + err.message });
+            console.log('[WebSearchProbe] HTTPS', authStyle, '→', parsed.hostname + pathSuffix, '| model=', modelId);
+            const req = https.request(opts, (res) => {
+                let chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => {
+                    const text = Buffer.concat(chunks).toString('utf8');
+                    if (res.statusCode !== 200) {
+                        return resolve({ ok: false, reason: 'HTTP ' + res.statusCode + ': ' + text.slice(0, 300) });
                     }
-                    return;
-                }
-                if (evt.type === 'assistant' && evt.message?.content) {
-                    for (const block of (evt.message.content || [])) {
-                        if (block.type === 'tool_use' && block.name === 'WebSearch') {
-                            calledWebSearch = true;
-                        }
+                    let data;
+                    try { data = JSON.parse(text); } catch (e) { return resolve({ ok: false, reason: 'Non-JSON response: ' + text.slice(0, 200) }); }
+                    const content = Array.isArray(data.content) ? data.content : [];
+                    const hasServerTool = content.some(b => b.type === 'server_tool_use' && (b.name === 'web_search' || b.name === 'WebSearch'));
+                    const resultBlock = content.find(b => b.type === 'web_search_tool_result');
+                    let hitCount = 0;
+                    if (resultBlock && Array.isArray(resultBlock.content)) {
+                        hitCount = resultBlock.content.filter(x => x && x.url).length;
                     }
-                }
-                if (evt.type === 'user' && evt.message?.content) {
-                    const blocks = Array.isArray(evt.message.content) ? evt.message.content : [];
-                    for (const block of blocks) {
-                        if (block.type === 'tool_result') {
-                            const n = extractUrlsFromToolResult(block.content);
-                            if (n > 0) hitCount += n;
-                        }
-                    }
-                }
-                if (evt.type === 'result') {
                     if (hitCount > 0) {
-                        finish({ ok: true, strategy: 'anthropic_native', hitCount });
-                    } else if (calledWebSearch) {
-                        finish({ ok: false, strategy: null, reason: 'WebSearch was invoked but returned 0 URLs' });
-                    } else if (evt.subtype === 'error_during_execution' || evt.is_error) {
-                        finish({ ok: false, strategy: null, reason: errorMessage || 'Engine reported an error' });
-                    } else {
-                        finish({ ok: false, strategy: null, reason: 'Model did not invoke WebSearch — upstream may lack web search support' });
+                        return resolve({ ok: true, hitCount, serverToolPresent: hasServerTool });
                     }
-                }
-            };
-
-            child.stdout.on('data', (chunk) => {
-                buf += chunk.toString();
-                const lines = buf.split('\n');
-                buf = lines.pop() || '';
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try { processEvt(JSON.parse(line)); } catch (_) {}
-                }
+                    if (hasServerTool) {
+                        return resolve({ ok: false, reason: 'server_tool_use present but 0 URLs in result' });
+                    }
+                    // Response has no server_tool_use at all — provider ignored the tool or doesn't support it
+                    return resolve({ ok: false, reason: 'Response has no server_tool_use block (provider likely strips web_search_20250305)' });
+                });
             });
-            child.stderr.on('data', (chunk) => {
-                const s = chunk.toString();
-                stderrBuf += s;
-                // Cap stderr buffer
-                if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000);
-                // Detect common auth/network errors early
-                if (!errorMessage) {
-                    const lower = s.toLowerCase();
-                    if (lower.includes('401') || lower.includes('unauthorized')) errorMessage = 'Upstream rejected credentials (401)';
-                    else if (lower.includes('403')) errorMessage = 'Upstream forbidden (403)';
-                    else if (lower.includes('invalid x-api-key')) errorMessage = 'Invalid API key';
-                    else if (lower.includes('enotfound') || lower.includes('dns')) errorMessage = 'DNS resolution failed';
-                }
+            req.on('error', (err) => {
+                const detail = err.code ? ' [' + err.code + (err.errno ? '/' + err.errno : '') + (err.hostname ? ' ' + err.hostname : '') + ']' : '';
+                resolve({ ok: false, reason: 'Network error: ' + err.message + detail });
             });
-            child.on('error', (err) => {
-                finish({ ok: false, strategy: null, reason: 'Engine process error: ' + err.message });
+            req.on('timeout', () => {
+                req.destroy(new Error('Request timed out after 45s'));
             });
-            child.on('exit', (code) => {
-                if (!finished) {
-                    const tail = stderrBuf ? ' (stderr tail: ' + stderrBuf.slice(-240).replace(/\s+/g, ' ') + ')' : '';
-                    finish({ ok: false, strategy: null, reason: (errorMessage || ('Engine exited with code ' + code)) + tail });
-                }
-            });
+            req.write(body);
+            req.end();
         });
+    }
+
+    async function probeAnthropicWebSearch(p) {
+        if (!p.baseUrl || !p.apiKey) return { ok: false, strategy: null, reason: 'Missing baseUrl or apiKey' };
+        // Try Bearer auth first (used by most aggregators like aiapikey.net, clawparrot, etc.),
+        // then fall back to x-api-key (canonical Anthropic API).
+        const styles = ['bearer', 'x-api-key'];
+        const attempts = [];
+        for (const style of styles) {
+            const result = await doAnthropicHttpProbe(p, style);
+            attempts.push({ style, result });
+            console.log('[WebSearchProbe] Anthropic attempt', style, '→', JSON.stringify(result));
+            if (result.ok) {
+                return { ok: true, strategy: 'anthropic_native', hitCount: result.hitCount };
+            }
+        }
+        // None of the styles succeeded — surface the most informative error
+        const bestFail = attempts.find(a => a.result.reason && !a.result.reason.includes('Network error'))
+            || attempts[0];
+        return {
+            ok: false,
+            strategy: null,
+            reason: bestFail.result.reason || 'All auth styles failed',
+        };
     }
 
     server.post('/api/providers/:id/test-websearch', async (req, res) => {
@@ -3226,6 +3230,11 @@ You have the following skills available. When a user's request matches a skill's
             }
         }
         else if (evt.type === 'assistant' && evt.message && evt.message.content) {
+            // Capture the engine session uuid the first time we see it this turn.
+            // Used by finishTurn to set db.messages.id, so the row's id matches the
+            // uuid in Claude Code's session JSONL — required for `--resume-session-at`
+            // to find this message when rewinding context after delete/edit/regenerate.
+            if (evt.uuid && !turn.assistantUuid) turn.assistantUuid = evt.uuid;
             for (var block of evt.message.content) {
                 if (block.type !== 'tool_use') continue;
                 var tc = turn.toolCalls.get(block.id);
@@ -3301,7 +3310,7 @@ You have the following skills available. When a user's request matches a skill's
         if (turn.maxTimeoutId) clearTimeout(turn.maxTimeoutId);
         engine.turn = null; engine.state = 'idle';
         if (turn.assistantText || turn.thinkingText || turn.toolCalls.size > 0) {
-            db.messages.push({ id: uuidv4(), conversation_id: convId, role: 'assistant', content: JSON.stringify([{ type: 'text', text: turn.assistantText }]), created_at: new Date().toISOString(), thinking: turn.thinkingText || undefined, toolCalls: turn.toolCalls.size > 0 ? turn.toolCallOrder.map(id => turn.toolCalls.get(id)).filter(Boolean) : undefined, toolTextEndOffset: (turn.toolCalls.size > 0 && turn.lastToolDoneTextLen > 0) ? turn.lastToolDoneTextLen : undefined, searchLogs: turn.searchLogs.length > 0 ? turn.searchLogs : undefined });
+            db.messages.push({ id: turn.assistantUuid || uuidv4(), conversation_id: convId, role: 'assistant', content: JSON.stringify([{ type: 'text', text: turn.assistantText }]), created_at: new Date().toISOString(), engineUuidSynced: !!turn.assistantUuid, thinking: turn.thinkingText || undefined, toolCalls: turn.toolCalls.size > 0 ? turn.toolCallOrder.map(id => turn.toolCalls.get(id)).filter(Boolean) : undefined, toolTextEndOffset: (turn.toolCalls.size > 0 && turn.lastToolDoneTextLen > 0) ? turn.lastToolDoneTextLen : undefined, searchLogs: turn.searchLogs.length > 0 ? turn.searchLogs : undefined });
             saveDb();
             generateTitleAsync(convId, turn.message.slice(0, 300), turn.assistantText.slice(0, 300), turn.apiKey, turn.baseUrl, conv.model, turn.apiFormat);
         }
@@ -3366,7 +3375,23 @@ You have the following skills available. When a user's request matches a skill's
         evictOldestEngine();
         const claudeDir = path.join(os.homedir(), '.claude');
         const cliArgs = ['--preload', enginePreload, '--env-file=' + engineEnv, engineCli, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', 'bypassPermissions', '--add-dir', claudeDir, '--model', modelId];
-        if (conv.claude_session_id) cliArgs.push('--resume', conv.claude_session_id);
+        if (conv.claude_session_id) {
+            cliArgs.push('--resume', conv.claude_session_id);
+            // If a delete/edit/regenerate queued a rewind point, slice the resumed
+            // session to that message uuid (engine loads JSONL, then truncates in
+            // memory to [0..uuid] inclusive — see cli/print.ts:5106).
+            if (conv.pendingResumeAt) {
+                cliArgs.push('--resume-session-at', conv.pendingResumeAt);
+                console.log('[EnginePool] Rewinding session ' + conv.claude_session_id + ' to message ' + conv.pendingResumeAt);
+            }
+        }
+        // Consume the rewind marker — only applies once per spawn. Subsequent normal
+        // turns must NOT pass --resume-session-at, or the engine would keep slicing
+        // off everything new.
+        if (conv.pendingResumeAt) {
+            conv.pendingResumeAt = null;
+            saveDb();
+        }
         if (sysPrompt) cliArgs.push('--append-system-prompt', sysPrompt);
         const envVars = Object.assign({}, process.env);
         if (gitBashPath && !envVars.CLAUDE_CODE_GIT_BASH_PATH) {
@@ -3598,10 +3623,18 @@ You have the following skills available. When a user's request matches a skill's
             }
 
             // 鈹€鈹€ 2. Save user message 鈹€鈹€
+            // Generate the uuid here so we can pass the SAME uuid to engine stdin
+            // below — that way db.messages.id matches the engine session JSONL uuid,
+            // which is required for `--resume-session-at` to find this message later.
+            // The `engineUuidSynced: true` flag marks this row as safe to rewind to;
+            // pre-fix rows lack the flag and the delete handler falls back to a
+            // clean-session reset for them.
+            const userMsgUuid = uuidv4();
             db.messages.push({
-                id: uuidv4(), conversation_id, role: 'user',
+                id: userMsgUuid, conversation_id, role: 'user',
                 content: JSON.stringify([{ type: 'text', text: message }]),
                 created_at: new Date().toISOString(),
+                engineUuidSynced: true,
                 attachments: attachments && attachments.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size, source: a.source, gh_repo: a.ghRepo, gh_ref: a.ghRef })) : undefined
             });
             saveDb();
@@ -3707,8 +3740,10 @@ You have the following skills available. When a user's request matches a skill's
                 lastActivitySource: 'turn_start',
             };
 
-            // Write user message to stdin (stream-json format)
-            engine.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: finalPrompt }, uuid: uuidv4() }) + '\n');
+            // Write user message to stdin (stream-json format).
+            // Reuse the same uuid as db.messages.id so the engine session uuid lines
+            // up with our row — required for context rewind via --resume-session-at.
+            engine.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: finalPrompt }, uuid: userMsgUuid }) + '\n');
 
             // Wait for turn to complete. Use an inactivity timeout so long-running
             // tasks can continue while they are still producing progress events.

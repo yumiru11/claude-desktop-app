@@ -33,12 +33,26 @@ export const IconResearch = ({ size = 20, className = "" }: { size?: number, cla
   </svg>
 );
 
+// Web Search icon - globe with meridian curves. Drawn inline so `currentColor` lets
+// callers tint to the blue accent when enabled. Matches the user-provided icon shape
+// (globe with vertical + horizontal sweep curves) while staying a proper stroked SVG.
+export const IconWebSearch = ({ size = 20, className = "" }: { size?: number, className?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M2 12h20" />
+    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+  </svg>
+);
+
 // Chats
 export const IconChatBubble = ({ size = 20, className = "" }: { size?: number, className?: string }) => (
   <img src={chatsImg} width={size} height={size} className={className} alt="Chats" />
 );
 
-// Projects
+// Projects — PNG icon. The source is dark-on-transparent. The default render gives
+// the icon no special dark-mode treatment — callers decide. The sidebar uses a plain
+// `dark:invert` (matching other nav icons), while the plus-menu callers add an
+// inline filter to hit the warm light gray ~#ABA499 tone of stroke-based icons there.
 export const IconProjects = ({ size = 20, className = "" }: { size?: number, className?: string }) => (
   <img src={projectsImg} width={size} height={size} className={className} alt="Projects" />
 );

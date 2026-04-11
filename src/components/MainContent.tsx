@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, X, Loader2 } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { IconPlus, IconVoice, IconPencil, IconProjects, IconResearch } from './Icons';
+import { IconPlus, IconVoice, IconPencil, IconProjects, IconResearch, IconWebSearch } from './Icons';
 import ClaudeLogo from './ClaudeLogo';
-import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, uploadFile, deleteAttachment, compactConversation, answerUserQuestion, getUserUsage, getAttachmentUrl, getGenerationStatus, stopGeneration, getContextSize, getUserModels, getStreamStatus, reconnectStream, getProviderModels, getSkills, warmEngine, getProjects, createProject, Project, materializeGithub } from '../api';
+import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, uploadFile, deleteAttachment, compactConversation, answerUserQuestion, getUserUsage, getAttachmentUrl, getGenerationStatus, stopGeneration, getContextSize, getUserModels, getStreamStatus, reconnectStream, getProviderModels, getSkills, warmEngine, getProjects, createProject, Project, materializeGithub, getProviders, Provider } from '../api';
 import { addStreaming, removeStreaming, isStreaming } from '../streamingState';
 import MarkdownRenderer from './MarkdownRenderer';
 import ResearchPanel from './ResearchPanel';
@@ -1211,6 +1211,30 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       try { await updateConversation(activeId, { research_mode: next }); } catch (_) {}
     }
   }, [researchMode, activeId]);
+
+  // Provider web-search capability (derived from the current model's provider).
+  // The bridge strips web_search_20250305 automatically when the provider doesn't support it,
+  // so this state is purely a UI indicator — no need to persist or toggle.
+  const [providersCache, setProvidersCache] = useState<Provider[]>([]);
+  const [webSearchToast, setWebSearchToast] = useState<string | null>(null);
+  useEffect(() => {
+    getProviders().then(setProvidersCache).catch(() => {});
+  }, []);
+  const currentProviderSupportsWebSearch = useMemo(() => {
+    if (!providersCache.length) return false;
+    const bareModel = (currentModelString || '').replace(/-thinking$/, '');
+    for (const p of providersCache) {
+      if ((p.models || []).some(m => m.id === bareModel)) {
+        return p.supportsWebSearch === true;
+      }
+    }
+    return false;
+  }, [providersCache, currentModelString]);
+  useEffect(() => {
+    if (!webSearchToast) return;
+    const t = setTimeout(() => setWebSearchToast(null), 2800);
+    return () => clearTimeout(t);
+  }, [webSearchToast]);
   const [showSkillsSubmenu, setShowSkillsSubmenu] = useState(false);
   const [enabledSkills, setEnabledSkills] = useState<Array<{ id: string; name: string; description?: string }>>([]);
   const [selectedSkill, setSelectedSkill] = useState<{ name: string; slug: string; description?: string } | null>(null);
@@ -3291,6 +3315,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           {projectAddToast}
         </div>
       )}
+      {webSearchToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
+          <IconWebSearch size={14} className="text-claude-textSecondary" />
+          {webSearchToast}
+        </div>
+      )}
     </>
   );
 
@@ -3425,13 +3455,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                         >
                           <div className="flex items-center gap-3">
-                            <IconProjects size={16} className="text-claude-textSecondary scale-[1.6]" />
+                            <IconProjects size={16} className="text-claude-textSecondary scale-[1.6] dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
                             Add to project
                           </div>
                           <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                         </button>
                         {showProjectsSubmenu && (
-                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
                             {projectList.length > 0 ? projectList.map(p => {
                               const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
                               return (
@@ -3441,7 +3471,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                                   className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors text-left"
                                 >
                                   <div className="flex items-center gap-2 min-w-0">
-                                    <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0" />
+                                    <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0 dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
                                     <span className="truncate">{p.name}</span>
                                   </div>
                                   {isSelected && <Check size={14} className="text-claude-textSecondary flex-shrink-0" />}
@@ -3481,7 +3511,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                         </button>
                         {showSkillsSubmenu && (
-                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
                             {enabledSkills.length > 0 ? enabledSkills.map(skill => (
                               <button
                                 key={skill.id}
@@ -3523,6 +3553,27 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             <span className={researchMode ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Research</span>
                           </div>
                           {researchMode && <Check size={14} className="text-[#2E7CF6]" />}
+                        </button>
+                      </div>
+                      {/* Web search indicator — always on when provider supports it, not togglable */}
+                      <div>
+                        <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                          onClick={() => {
+                            if (currentProviderSupportsWebSearch) {
+                              setShowPlusMenu(false);
+                            } else {
+                              setWebSearchToast('当前模型的供应商不支持网页搜索');
+                              setShowPlusMenu(false);
+                            }
+                          }}
+                          className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <IconWebSearch size={16} className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
+                            <span className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Web search</span>
+                          </div>
+                          {currentProviderSupportsWebSearch && <Check size={14} className="text-[#2E7CF6]" />}
                         </button>
                       </div>
                     </div>
@@ -3734,13 +3785,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                           >
                             <div className="flex items-center gap-3">
-                              <IconProjects size={16} className="text-claude-textSecondary scale-[1.6]" />
+                              <IconProjects size={16} className="text-claude-textSecondary scale-[1.6] dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
                               Add to project
                             </div>
                             <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                           </button>
                           {showProjectsSubmenu && (
-                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
                               {projectList.length > 0 ? projectList.map(p => {
                                 const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
                                 return (
@@ -3750,7 +3801,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                                     className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors text-left"
                                   >
                                     <div className="flex items-center gap-2 min-w-0">
-                                      <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0" />
+                                      <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0 dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
                                       <span className="truncate">{p.name}</span>
                                     </div>
                                     {isSelected && <Check size={14} className="text-claude-textSecondary flex-shrink-0" />}
@@ -3791,7 +3842,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                           </button>
                           {showSkillsSubmenu && enabledSkills.length > 0 && (
-                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
                               {enabledSkills.map(skill => (
                                 <button
                                   key={skill.id}
@@ -3866,6 +3917,27 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                               <span className={researchMode ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Research</span>
                             </div>
                             {researchMode && <Check size={14} className="text-[#2E7CF6]" />}
+                          </button>
+                        </div>
+                        {/* Web search indicator — always on when provider supports it, not togglable */}
+                        <div>
+                          <button
+                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                            onClick={() => {
+                              if (currentProviderSupportsWebSearch) {
+                                setShowPlusMenu(false);
+                              } else {
+                                setWebSearchToast('当前模型的供应商不支持网页搜索');
+                                setShowPlusMenu(false);
+                              }
+                            }}
+                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <IconWebSearch size={16} className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
+                              <span className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Web search</span>
+                            </div>
+                            {currentProviderSupportsWebSearch && <Check size={14} className="text-[#2E7CF6]" />}
                           </button>
                         </div>
                       </div>

@@ -250,7 +250,7 @@ const ProjectsPage = () => {
             </button>
           </div>
 
-          <div className="flex items-start justify-between mb-8">
+          <div className="flex items-start justify-between mb-8 gap-4">
             <div className="flex-1 min-w-0">
               {editingName ? (
                 <div className="flex items-center gap-2">
@@ -265,9 +265,8 @@ const ProjectsPage = () => {
                 </div>
               ) : (
                 <h1
-                  className="font-[Spectral] text-[32px] text-claude-text leading-tight mb-2 cursor-pointer hover:opacity-80"
+                  className="font-[Spectral] text-[32px] text-claude-text leading-tight mb-2"
                   style={{ fontWeight: 500 }}
-                  onClick={() => { setEditingName(true); setEditName(currentProject.name); }}
                 >
                   {currentProject.name}
                 </h1>
@@ -276,8 +275,7 @@ const ProjectsPage = () => {
                 <p className="text-[15.5px] text-claude-textSecondary">{currentProject.description}</p>
               )}
             </div>
-            <div className="absolute right-0 flex items-center gap-1 text-claude-textSecondary mt-2">
-              <button className="p-1 hover:text-claude-text hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors"><Star size={18} /></button>
+            <div className="flex items-center gap-1 text-claude-textSecondary mt-2 flex-shrink-0">
               <button className="p-1 hover:text-claude-text hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors"><MoreVertical size={18} /></button>
             </div>
           </div>
@@ -782,17 +780,17 @@ const ProjectsPage = () => {
 
       {projectToDelete && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-[#2A2A2A] w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-[#444] overflow-hidden">
+          <div className="bg-claude-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-claude-border overflow-hidden">
             <div className="px-6 pt-6 pb-4 text-left">
-              <h3 className="text-[19px] font-semibold text-[#efefef] mb-3">Delete project</h3>
-              <p className="text-[15px] text-[#A1A1AA] leading-relaxed pr-4">
+              <h3 className="text-[19px] font-semibold text-claude-text mb-3">Delete project</h3>
+              <p className="text-[15px] text-claude-textSecondary leading-relaxed pr-4">
                 确定要删除项目「{projectToDelete.name}」吗？所有关联的文件和对话也会被删除。
               </p>
             </div>
             <div className="px-5 pb-5 pt-2 flex justify-end gap-3 mt-4">
               <button
                 onClick={() => setProjectToDelete(null)}
-                className="px-5 py-2 text-[14.5px] font-medium text-[#efefef] border border-[#555] hover:bg-white/5 rounded-[8px] transition-colors"
+                className="px-5 py-2 text-[14.5px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-[8px] transition-colors"
               >
                 Cancel
               </button>
@@ -809,28 +807,28 @@ const ProjectsPage = () => {
 
       {projectToEdit && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-[#242424] w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-[#444] overflow-hidden">
+          <div className="bg-claude-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-claude-border overflow-hidden">
             <div className="px-6 pt-6 pb-4 text-left">
-              <h3 className="text-[19px] font-semibold text-[#efefef] mb-5">Edit details</h3>
+              <h3 className="text-[19px] font-semibold text-claude-text mb-5">Edit details</h3>
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-[14px] text-[#A1A1AA] mb-2 font-medium">Name</label>
+                  <label className="block text-[14px] text-claude-textSecondary mb-2 font-medium">Name</label>
                   <input
                     type="text"
                     value={editDetailsName}
                     onChange={(e) => setEditDetailsName(e.target.value)}
-                    className="w-full px-3 py-2 bg-transparent border border-white/20 rounded-[8px] text-white outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all text-[15px]"
+                    className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-[8px] text-claude-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all text-[15px]"
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-[14px] text-[#A1A1AA] mb-2 font-medium">Description</label>
+                  <label className="block text-[14px] text-claude-textSecondary mb-2 font-medium">Description</label>
                   <textarea
                     value={editDetailsDesc}
                     onChange={(e) => setEditDetailsDesc(e.target.value)}
                     rows={4}
-                    className="w-full px-3 py-2 bg-[#30302E] border border-white/5 rounded-[8px] text-white outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all resize-none text-[14.5px] leading-relaxed"
+                    className="w-full px-3 py-2 bg-claude-bg border border-claude-border rounded-[8px] text-claude-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all resize-none text-[14.5px] leading-relaxed"
                   />
                 </div>
               </div>
@@ -839,13 +837,13 @@ const ProjectsPage = () => {
             <div className="px-6 pb-6 pt-2 flex justify-end gap-3 mt-4">
               <button
                 onClick={() => setProjectToEdit(null)}
-                className="px-5 py-2.5 text-[14.5px] font-medium text-[#efefef] border border-[#555] hover:bg-white/5 rounded-[8px] transition-colors"
+                className="px-5 py-2.5 text-[14.5px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-[8px] transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSaveEditDetails}
-                className="px-5 py-2.5 text-[14.5px] font-medium text-[#222] bg-white hover:bg-gray-100 rounded-[8px] transition-colors"
+                className="px-5 py-2.5 text-[14.5px] font-medium bg-claude-text text-claude-bg hover:opacity-90 rounded-[8px] transition-opacity"
               >
                 Save
               </button>
