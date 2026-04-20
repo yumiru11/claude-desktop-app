@@ -237,9 +237,16 @@ export const getAllModelBetas = memoize((model: string): string[] => {
   const provider = getAPIProvider()
   const includeFirstPartyOnlyBetas = shouldIncludeFirstPartyOnlyBetas()
 
-  // Removed claude-code beta header to avoid fingerprinting
   if (!isHaiku) {
-    // betaHeaders.push(CLAUDE_CODE_20250219_BETA_HEADER)
+    betaHeaders.push(CLAUDE_CODE_20250219_BETA_HEADER)
+    if (
+      process.env.USER_TYPE === 'ant' &&
+      process.env.CLAUDE_CODE_ENTRYPOINT === 'cli'
+    ) {
+      if (CLI_INTERNAL_BETA_HEADER) {
+        betaHeaders.push(CLI_INTERNAL_BETA_HEADER)
+      }
+    }
   }
   if (isClaudeAISubscriber()) {
     betaHeaders.push(OAUTH_BETA_HEADER)
@@ -399,7 +406,17 @@ export function getMergedBetas(
   // For non-Haiku models these are already in baseBetas; for Haiku they're
   // excluded by getAllModelBetas() since non-agentic Haiku calls don't need them.
   if (options?.isAgenticQuery) {
-    // Removed claude-code beta headers to avoid fingerprinting
+    if (!baseBetas.includes(CLAUDE_CODE_20250219_BETA_HEADER)) {
+      baseBetas.push(CLAUDE_CODE_20250219_BETA_HEADER)
+    }
+    if (
+      process.env.USER_TYPE === 'ant' &&
+      process.env.CLAUDE_CODE_ENTRYPOINT === 'cli' &&
+      CLI_INTERNAL_BETA_HEADER &&
+      !baseBetas.includes(CLI_INTERNAL_BETA_HEADER)
+    ) {
+      baseBetas.push(CLI_INTERNAL_BETA_HEADER)
+    }
   }
 
   const sdkBetas = getSdkBetas()
